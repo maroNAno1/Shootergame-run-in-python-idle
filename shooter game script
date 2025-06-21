@@ -1,0 +1,397 @@
+import pygame
+import sys
+import math
+
+pygame.init()
+pygame.joystick.init()
+joysticks = [pygame.joystick.Joystick(i) for i in range(pygame.joystick.get_count())]
+for joy in joysticks:
+    joy.init()
+
+
+WIDTH, HEIGHT = 900, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Local Multiplayer Shooter with Loadout, Health, Reload, Scoreboard")
+
+clock = pygame.time.Clock()
+font = pygame.font.SysFont("Arial", 20)
+big_font = pygame.font.SysFont("Arial", 40)
+
+# Colors
+WHITE = (255, 255, 255)
+RED = (200, 0, 0)
+BLUE = (0, 0, 200)
+GREEN = (0, 255, 0)
+YELLOW = (255, 255, 0)
+GRAY = (100, 100, 100)
+BLACK = (30, 30, 30)
+
+WEAPONS = [
+    {"name": "Pistol", "fire_rate": 500, "bullet_speed": 10, "bullets_per_shot": 1, "spread": 0, "magazine": 7, "reload_time": 2000},
+    {"name": "Shotgun", "fire_rate": 1000, "bullet_speed": 7, "bullets_per_shot": 3, "spread": 15, "magazine": 5, "reload_time": 3000},
+    {"name": "SMG", "fire_rate": 100, "bullet_speed": 15, "bullets_per_shot": 1, "spread": 0, "magazine": 30, "reload_time": 1500}
+]
+
+class Player(pygame.sprite.Sprite):
+    def __init__(self, x, y, color, controls, shoot_dir):
+        super().__init__()
+        self.image = pygame.Surface((40, 40))
+        self.color = color
+        self.image.fill(self.color)
+        self.rect = self.image.get_rect(center=(x, y))
+        self.speed = 5
+        self.controls = controls
+        self.shoot_dir = shoot_dir
+        self.bullets = pygame.sprite.Group()
+        self.last_shot = 0
+        self.health = 100
+        self.alive = True
+        self.kills = 0
+
+        self.weapon_index = 0
+        self.weapon = WEAPONS[self.weapon_index]
+        self.bullets_left = self.weapon["magazine"]
+        self.reloading = False
+        self.reload_start_time = 0
+
+    def move(self, keys):
+        if keys[self.controls['up']]:
+            self.rect.y -= self.speed
+        if keys[self.controls['down']]:
+            self.rect.y += self.speed
+        if keys[self.controls['left']]:
+            self.rect.x -= self.speed
+        if keys[self.controls['right']]:
+            self.rect.x += self.speed
+        self.rect.clamp_ip(screen.get_rect())
+
+    def set_weapon(self, idx):
+        self.weapon_index = idx
+        self.weapon = WEAPONS[idx]
+        self.bullets_left = self.weapon["magazine"]
+        self.reloading = False
+
+    def reload(self, keys, current_time):
+        if self.reloading:
+            if current_time - self.reload_start_time >= self.weapon["reload_time"]:
+                self.reloading = False
+                self.bullets_left = self.weapon["magazine"]
+        else:
+            if keys[self.controls['reload']] and self.bullets_left < self.weapon["magazine"]:
+                self.reloading = True
+                self.reload_start_time = current_time
+
+    def shoot(self, current_time):
+        if self.reloading or not self.alive:
+            return
+        if current_time - self.last_shot < self.weapon["fire_rate"]:
+            return
+        if self.bullets_left <= 0:
+            return
+
+        self.last_shot = current_time
+        base_angle = 0 if self.shoot_dir == 'right' else 180
+        bullets_per_shot = self.weapon["bullets_per_shot"]
+        spread = self.weapon["spread"]
+
+        for i in range(bullets_per_shot):
+            angle_offset = 0
+            if bullets_per_shot > 1:
+                angle_offset = spread * (i - (bullets_per_shot - 1) / 2)
+            angle = base_angle + angle_offset
+            self.bullets.add(Bullet(self.rect.center, angle, self.weapon["bullet_speed"], self))
+
+        self.bullets_left -= 1
+
+    def update(self, keys, current_time):
+        if not self.alive:
+            return
+        self.move(keys)
+        self.reload(keys, current_time)
+        self.bullets.update()
+
+    def draw(self, surface):
+        surface.blit(self.image, self.rect)
+        self.bullets.draw(surface)
+
+        # Health bar
+        health_bar_width = 50
+        health_bar_height = 8
+        hb_x = self.rect.centerx - health_bar_width // 2
+        hb_y = self.rect.top - 15
+        pygame.draw.rect(surface, RED, (hb_x, hb_y, health_bar_width, health_bar_height))
+        pygame.draw.rect(surface, GREEN, (hb_x, hb_y, int(health_bar_width * self.health / 100), health_bar_height))
+        pygame.draw.rect(surface, WHITE, (hb_x, hb_y, health_bar_width, health_bar_height), 2)
+
+        # Weapon name & ammo
+        weapon_text = font.render(f"{self.weapon['name']} ({self.bullets_left}/{self.weapon['magazine']})", True, WHITE)
+        surface.blit(weapon_text, (self.rect.x, self.rect.y - 35))
+
+        if self.reloading:
+            reload_text = font.render("Reloading...", True, YELLOW)
+            surface.blit(reload_text, (self.rect.x, self.rect.y - 55))
+
+class Bullet(pygame.sprite.Sprite):
+    def __init__(self, pos, angle_deg, speed, owner):
+        super().__init__()
+        self.image = pygame.Surface((8, 4))
+        self.image.fill(YELLOW)
+        self.orig_image = self.image
+        self.rect = self.image.get_rect(center=pos)
+        self.speed = speed
+        self.angle = math.radians(angle_deg)
+        self.owner = owner
+
+        self.image = pygame.transform.rotate(self.orig_image, -angle_deg)
+
+        self.dx = math.cos(self.angle) * self.speed
+        self.dy = -math.sin(self.angle) * self.speed
+
+    def update(self):
+        self.rect.x += self.dx
+        self.rect.y += self.dy
+
+        if not screen.get_rect().colliderect(self.rect):
+            self.kill()
+
+def handle_bullet_collisions(player1, player2):
+    for bullet in player1.bullets:
+        if player2.alive and bullet.rect.colliderect(player2.rect):
+            player2.health -= 20
+            bullet.kill()
+            if player2.health <= 0:
+                player2.alive = False
+                player1.kills += 1
+                pygame.time.set_timer(pygame.USEREVENT + 1, 3000)
+
+    for bullet in player2.bullets:
+        if player1.alive and bullet.rect.colliderect(player1.rect):
+            player1.health -= 20
+            bullet.kill()
+            if player1.health <= 0:
+                player1.alive = False
+                player2.kills += 1
+                pygame.time.set_timer(pygame.USEREVENT + 2, 3000)
+
+def respawn(player, pos):
+    player.health = 100
+    player.alive = True
+    player.rect.center = pos
+    player.bullets.empty()
+    player.reloading = False
+    player.bullets_left = player.weapon["magazine"]
+
+def draw_scores(surface, player1, player2):
+    text = big_font.render(f"P1 Kills: {player1.kills}    P2 Kills: {player2.kills}", True, WHITE)
+    surface.blit(text, (WIDTH // 2 - text.get_width() // 2, 10))
+
+def loadout_screen():
+    selected1 = 0
+    selected2 = 0
+    confirm1 = False
+    confirm2 = False
+
+    cooldown = 200
+    last_change_time1 = 0
+    last_change_time2 = 0
+
+    while True:
+        screen.fill(BLACK)
+        current_time = pygame.time.get_ticks()
+        events = pygame.event.get()
+        for event in events:
+            if event.type == pygame.QUIT:
+                pygame.quit()
+                sys.exit()
+
+        keys = pygame.key.get_pressed()
+
+        # Player 1 controls Q/E to cycle weapon; Enter to confirm
+        for event in events:
+            if event.type == pygame.KEYDOWN:
+                if not confirm1:
+                    if event.key == pygame.K_q and current_time - last_change_time1 > cooldown:
+                        selected1 = (selected1 - 1) % len(WEAPONS)
+                        last_change_time1 = current_time
+                    elif event.key == pygame.K_e and current_time - last_change_time1 > cooldown:
+                        selected1 = (selected1 + 1) % len(WEAPONS)
+                        last_change_time1 = current_time
+                if event.key == pygame.K_RETURN:
+                    confirm1 = True
+                    confirm2 = True
+
+                if not confirm2:
+                    if event.key == pygame.K_COMMA and current_time - last_change_time2 > cooldown:
+                        selected2 = (selected2 - 1) % len(WEAPONS)
+                        last_change_time2 = current_time
+                    elif event.key == pygame.K_PERIOD and current_time - last_change_time2 > cooldown:
+                        selected2 = (selected2 + 1) % len(WEAPONS)
+                        last_change_time2 = current_time
+
+        # Draw UI
+        title = big_font.render("Loadout Selection", True, WHITE)
+        screen.blit(title, (WIDTH//2 - title.get_width()//2, 20))
+
+        # Player 1 weapon list
+        p1_text = font.render("Player 1 Select Weapon (Q/E):", True, BLUE)
+        screen.blit(p1_text, (100, 100))
+        for idx, w in enumerate(WEAPONS):
+            color = BLUE if idx == selected1 else GRAY
+            w_text = font.render(w["name"], True, color)
+            screen.blit(w_text, (100, 140 + idx*30))
+        if confirm1:
+            c_text = font.render("Ready!", True, GREEN)
+            screen.blit(c_text, (100, 140 + selected1*30 - 25))
+
+        # Player 2 weapon list
+        p2_text = font.render("Player 2 Select Weapon (,/.):", True, RED)
+        screen.blit(p2_text, (WIDTH - 300, 100))
+        for idx, w in enumerate(WEAPONS):
+            color = RED if idx == selected2 else GRAY
+            w_text = font.render(w["name"], True, color)
+            screen.blit(w_text, (WIDTH - 300, 140 + idx*30))
+        if confirm2:
+            c_text = font.render("Ready!", True, GREEN)
+            screen.blit(c_text, (WIDTH - 300, 140 + selected2*30 - 25))
+
+        if confirm1 and confirm2:
+            start_text = font.render("Press ENTER to start!", True, WHITE)
+            screen.blit(start_text, (WIDTH//2 - start_text.get_width()//2, HEIGHT - 50))
+            if keys[pygame.K_RETURN]:
+                return selected1, selected2
+
+        pygame.display.flip()
+        clock.tick(60)
+
+def main():
+    selected1, selected2 = loadout_screen()
+
+    player1_controls = {
+        'up': pygame.K_w,
+        'down': pygame.K_s,
+        'left': pygame.K_a,
+        'right': pygame.K_d,
+        'shoot': pygame.K_f,        # Changed from LCTRL to F
+        'weapon_prev': pygame.K_q,
+        'weapon_next': pygame.K_e,
+        'reload': pygame.K_r
+    }
+
+    player2_controls = {
+        'up': pygame.K_UP,
+        'down': pygame.K_DOWN,
+        'left': pygame.K_LEFT,
+        'right': pygame.K_RIGHT,
+        'shoot': pygame.K_KP0,      # Changed from RCTRL to Numpad 0
+        'weapon_prev': pygame.K_COMMA,
+        'weapon_next': pygame.K_PERIOD,
+        'reload': pygame.K_SLASH
+    }
+
+    player1 = Player(100, HEIGHT // 2, BLUE, player1_controls, shoot_dir='right')
+    player2 = Player(WIDTH - 100, HEIGHT // 2, RED, player2_controls, shoot_dir='left')
+
+    player1.set_weapon(selected1)
+    player2.set_weapon(selected2)
+
+    all_sprites = pygame.sprite.Group(player1, player2)
+
+    running = True
+
+    RESPAWN_EVENT_P1 = pygame.USEREVENT + 1
+    RESPAWN_EVENT_P2 = pygame.USEREVENT + 2
+
+    while running:
+        current_time = pygame.time.get_ticks()
+        screen.fill(BLACK)
+
+        events = pygame.event.get()
+        for event in events:
+            if event.type == pygame.QUIT:
+                running = False
+            if event.type == RESPAWN_EVENT_P1:
+                respawn(player1, (100, HEIGHT // 2))
+                pygame.time.set_timer(RESPAWN_EVENT_P1, 0)
+            if event.type == RESPAWN_EVENT_P2:
+                respawn(player2, (WIDTH - 100, HEIGHT // 2))
+                pygame.time.set_timer(RESPAWN_EVENT_P2, 0)
+
+        keys = pygame.key.get_pressed()
+
+        if player1.alive:
+            player1.update(keys, current_time)
+        if player2.alive:
+            player2.update(keys, current_time)
+
+        # Shooting detection with debug prints (commented out)
+        for event in events:
+            if event.type == pygame.KEYDOWN:
+                # print(f"Key pressed: {event.key}")  # Uncomment to debug key codes
+                if event.key == player1.controls['shoot']:
+                    # print("Player 1 shoots")
+                    player1.shoot(current_time)
+                if event.key == player2.controls['shoot']:
+                    # print("Player 2 shoots")
+                    player2.shoot(current_time)
+
+        handle_bullet_collisions(player1, player2)
+
+        all_sprites.draw(screen)
+        player1.draw(screen)
+        player2.draw(screen)
+        draw_scores(screen, player1, player2)
+
+        pygame.display.flip()
+        clock.tick(60)
+
+    pygame.quit()
+    sys.exit()
+
+if __name__ == "__main__":
+    main()
+    # Gamepad support
+if len(joysticks) > 0:
+    j1 = joysticks[0]
+    axis_x1 = j1.get_axis(0)
+    axis_y1 = j1.get_axis(1)
+    if player1.alive:
+        if abs(axis_x1) > 0.2:
+            player1.rect.x += int(axis_x1 * player1.speed)
+        if abs(axis_y1) > 0.2:
+            player1.rect.y += int(axis_y1 * player1.speed)
+
+    # Buttons: 0 = A, 1 = B
+    if j1.get_button(0):
+        player1.shoot(current_time)
+    if j1.get_button(1):
+        player1.reloading = True
+        player1.reload_start_time = current_time
+
+    # Weapon switching via D-Pad
+    hat_x1, _ = j1.get_hat(0)
+    if hat_x1 == 1:
+        player1.set_weapon((player1.weapon_index + 1) % len(WEAPONS))
+    elif hat_x1 == -1:
+        player1.set_weapon((player1.weapon_index - 1) % len(WEAPONS))
+
+if len(joysticks) > 1:
+    j2 = joysticks[1]
+    axis_x2 = j2.get_axis(0)
+    axis_y2 = j2.get_axis(1)
+    if player2.alive:
+        if abs(axis_x2) > 0.2:
+            player2.rect.x += int(axis_x2 * player2.speed)
+        if abs(axis_y2) > 0.2:
+            player2.rect.y += int(axis_y2 * player2.speed)
+
+    if j2.get_button(0):
+        player2.shoot(current_time)
+    if j2.get_button(1):
+        player2.reloading = True
+        player2.reload_start_time = current_time
+
+    hat_x2, _ = j2.get_hat(0)
+    if hat_x2 == 1:
+        player2.set_weapon((player2.weapon_index + 1) % len(WEAPONS))
+    elif hat_x2 == -1:
+        player2.set_weapon((player2.weapon_index - 1) % len(WEAPONS))
